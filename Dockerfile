@@ -1,18 +1,17 @@
-FROM debian:13
+FROM alpine:3.20
 
-ENV DEBIAN_FRONTEND=noninteractive \
-    PYTHONDONTWRITEBYTECODE=1 \
+ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PORT=10000 \
-    CONSOLE_TOKEN=change-me
+    CONSOLE_TOKEN=6735d1a5a6464eca39ca08bc7d519df11ff045c869d1c783
 
 WORKDIR /app
 
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
+RUN apk update && \
+    apk add --no-cache \
       python3 \
-      python3-venv \
-      python3-pip \
+      py3-pip \
+      py3-virtualenv \
       bash \
       sudo \
       ca-certificates \
@@ -31,16 +30,16 @@ RUN apt-get update && \
       tar \
       gzip \
       bzip2 \
-      xz-utils \
+      xz \
       jq \
       file \
       lsof \
       procps \
       psmisc \
       iproute2 \
-      iputils-ping \
+      iputils \
       net-tools \
-      dnsutils \
+      bind-tools \
       traceroute \
       socat \
       netcat-openbsd \
@@ -48,17 +47,12 @@ RUN apt-get update && \
       pciutils \
       usbutils \
       kmod \
-      locales \
       tzdata \
-      cron \
+      dcron \
       logrotate \
       gnupg \
       openssl \
-      systemd \
-      systemd-sysv \
-      dbus \
-      dbus-user-session \
-    && rm -rf /var/lib/apt/lists/*
+      dbus
 
 COPY requirements.txt /app/requirements.txt
 RUN python3 -m venv /opt/venv && \
@@ -71,5 +65,4 @@ COPY static /app/static
 RUN chmod +x /app/start.sh
 
 EXPOSE 10000
-
 CMD ["/app/start.sh"]
