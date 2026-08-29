@@ -3,6 +3,7 @@ import fcntl
 import json
 import os
 import pty
+import secrets
 import select
 import shutil
 import signal
@@ -23,7 +24,8 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 def safe_token(candidate: str) -> bool:
-    return bool(CONSOLE_TOKEN) and candidate == CONSOLE_TOKEN
+    # Constant-time comparison to avoid leaking token length/content via timing.
+    return bool(CONSOLE_TOKEN) and secrets.compare_digest(candidate, CONSOLE_TOKEN)
 
 
 def set_winsize(fd: int, rows: int, cols: int) -> None:
@@ -42,6 +44,16 @@ def child_shell() -> None:
     os.execv("/bin/bash", ["/bin/bash", "--login"])
 
 
+def detect_os() -> str:
+    alpine_release = Path("/etc/alpine-release")
+    if alpine_release.exists():
+        return f"Alpine {alpine_release.read_text().strip()}"
+    debian_version = Path("/etc/debian_version")
+    if debian_version.exists():
+        return f"Debian {debian_version.read_text().strip()}"
+    return "unknown"
+
+
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
@@ -51,7 +63,7 @@ def index() -> FileResponse:
 def status() -> JSONResponse:
     return JSONResponse({
         "online": True,
-        "debian": Path("/etc/debian_version").read_text().strip() if Path("/etc/debian_version").exists() else "unknown",
+        "os": detect_os(),
         "hostname": os.uname().nodename,
         "shell": "/bin/bash",
         "systemctl": shutil.which("systemctl") is not None,
@@ -135,7 +147,7 @@ async def terminal(websocket: WebSocket) -> None:
 
         await websocket.send_text(json.dumps({
             "type": "ready",
-            "message": "Authenticated. Connected to Debian 13 PTY.\r\n",
+            "message": f"Authenticated. Connected to {detect_os()} PTY.\r\n",
         }))
 
         sender = asyncio.create_task(browser_to_pty())
