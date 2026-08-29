@@ -9,6 +9,4 @@ if [ -z "$CONSOLE_TOKEN" ] || [ "$CONSOLE_TOKEN" = "change-me" ]; then
   exit 1
 fi
 
-mkdir -p /run/sshd
-
 exec /opt/venv/bin/uvicorn server:app --host 0.0.0.0 --port "$PORT"
