@@ -1,0 +1,127 @@
+name: Build Alpine Linux disk.img for UML
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            wget dosfstools e2fsprogs \
+            parted util-linux qemu-utils
+
+      - name: Download Alpine Linux minirootfs
+        run: |
+          # Alpine 3.19 x86_64 minirootfs (~17MB installed)
+          ALPINE_VERSION=3.19.1
+          ARCH=x86_64
+          TARBALL=alpine-minirootfs-${ALPINE_VERSION}-${ARCH}.tar.gz
+          wget -q "https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/${ARCH}/${TARBALL}" \
+            -O alpine-minirootfs.tar.gz
+          echo "Downloaded Alpine minirootfs"
+
+      - name: Create disk.img with ext4
+        run: |
+          # Create a 64MB sparse image (Alpine ~17MB, plenty of room)
+          dd if=/dev/null of=disk.img bs=1M seek=64
+          
+          # Format as ext4
+          mkfs.ext4 -F -L alpine-uml disk.img
+          
+          echo "disk.img created and formatted"
+
+      - name: Populate disk.img with Alpine rootfs
+        run: |
+          # Mount the image
+          mkdir -p /tmp/mnt
+          sudo mount -o loop disk.img /tmp/mnt
+          
+          # Extract Alpine minirootfs into the image
+          sudo tar -xzf alpine-minirootfs.tar.gz -C /tmp/mnt
+          
+          echo "=== Rootfs contents ==="
+          ls /tmp/mnt
+          
+          # Basic /etc/fstab for UML
+          sudo tee /tmp/mnt/etc/fstab > /dev/null <<'EOF'
+          /dev/root  /        ext4  defaults  0 1
+          proc       /proc    proc  defaults  0 0
+          sysfs      /sys     sysfs defaults  0 0
+          tmpfs      /tmp     tmpfs defaults  0 0
+          EOF
+          
+          # inittab for UML (uses /dev/console, not tty1)
+          sudo tee /tmp/mnt/etc/inittab > /dev/null <<'EOF'
+          ::sysinit:/sbin/openrc sysinit
+          ::sysinit:/sbin/openrc boot
+          ::wait:/sbin/openrc default
+          console::respawn:/sbin/getty -L console 115200 vt100
+          ::shutdown:/sbin/openrc shutdown
+          EOF
+          
+          # Set root password to empty (for easy UML login)
+          sudo chroot /tmp/mnt /bin/sh -c "passwd -d root"
+          
+          # Minimal hostname
+          echo "alpine-uml" | sudo tee /tmp/mnt/etc/hostname > /dev/null
+          
+          # loopback interface
+          sudo tee /tmp/mnt/etc/network/interfaces > /dev/null <<'EOF'
+          auto lo
+          iface lo inet loopback
+          EOF
+
+      - name: Show disk usage
+        run: |
+          df -h /tmp/mnt
+          echo "=== Alpine version ==="
+          cat /tmp/mnt/etc/alpine-release 2>/dev/null || true
+
+      - name: Unmount image
+        run: |
+          sudo umount /tmp/mnt
+
+      - name: Compress disk.img
+        run: |
+          # Show raw size
+          du -sh disk.img
+          
+          # Compress for artifact upload
+          gzip -9 -k disk.img
+          du -sh disk.img.gz
+
+      - name: Upload disk.img as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: alpine-uml-disk
+          path: |
+            disk.img
+            disk.img.gz
+          retention-days: 30
+
+      - name: Show usage instructions
+        run: |
+          echo "=========================================="
+          echo "  HOW TO USE disk.img WITH LINUX UML"
+          echo "=========================================="
+          echo ""
+          echo "Download the artifact, then run:"
+          echo ""
+          echo "  linux ubd0=disk.img mem=256M"
+          echo ""
+          echo "Or with network (tap):"
+          echo ""
+          echo "  linux ubd0=disk.img mem=256M eth0=tuntap,tap0"
+          echo ""
+          echo "Login: root (no password)"
+          echo "=========================================="
