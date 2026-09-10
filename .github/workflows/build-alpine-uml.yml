@@ -10,9 +10,9 @@ on:
         required: false
         default: '9'
       alpine_version:
-        description: 'Phien ban Alpine (mac dinh 3.19)'
+        description: 'Phien ban Alpine (mac dinh 3.20, can 3.20+ de co fastfetch)'
         required: false
-        default: '3.19'
+        default: '3.20'
 
 jobs:
   build:
@@ -32,7 +32,7 @@ jobs:
         id: cfg
         run: |
           DISK_GB="${{ github.event.inputs.disk_size_gb || '9' }}"
-          ALPINE_VER="${{ github.event.inputs.alpine_version || '3.19' }}"
+          ALPINE_VER="${{ github.event.inputs.alpine_version || '3.20' }}"
           ARCH="x86_64"
           echo "DISK_GB=$DISK_GB"       >> "$GITHUB_OUTPUT"
           echo "ALPINE_VER=$ALPINE_VER" >> "$GITHUB_OUTPUT"
@@ -67,15 +67,15 @@ jobs:
 
           # --- DNS ---
           sudo tee /tmp/alpine-root/etc/resolv.conf > /dev/null <<'EOF'
-          nameserver 10.0.2.3
-          nameserver 8.8.8.8
-          EOF
+nameserver 10.0.2.3
+nameserver 8.8.8.8
+EOF
 
-          # --- APK repos ---
+          # --- APK repos (khong chay apk update o day, de chroot tu lam) ---
           sudo tee /tmp/alpine-root/etc/apk/repositories > /dev/null <<EOF
-          https://dl-cdn.alpinelinux.org/alpine/v${MINOR}/main
-          https://dl-cdn.alpinelinux.org/alpine/v${MINOR}/community
-          EOF
+https://dl-cdn.alpinelinux.org/alpine/v${MINOR}/main
+https://dl-cdn.alpinelinux.org/alpine/v${MINOR}/community
+EOF
 
           # --- fstab ---
           sudo tee /tmp/alpine-root/etc/fstab > /dev/null <<'EOF'
