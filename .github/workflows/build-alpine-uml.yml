@@ -10,7 +10,7 @@ on:
         required: false
         default: '9'
       alpine_version:
-        description: 'Phien ban Alpine (mac dinh 3.20, can 3.20+ de co fastfetch)'
+        description: 'Phien ban Alpine (can 3.20+ de co fastfetch)'
         required: false
         default: '3.20'
 
@@ -33,13 +33,12 @@ jobs:
         run: |
           DISK_GB="${{ github.event.inputs.disk_size_gb || '9' }}"
           ALPINE_VER="${{ github.event.inputs.alpine_version || '3.20' }}"
-          ARCH="x86_64"
           echo "DISK_GB=$DISK_GB"       >> "$GITHUB_OUTPUT"
           echo "ALPINE_VER=$ALPINE_VER" >> "$GITHUB_OUTPUT"
-          echo "ARCH=$ARCH"             >> "$GITHUB_OUTPUT"
+          echo "ARCH=x86_64"            >> "$GITHUB_OUTPUT"
           echo "=== Alpine $ALPINE_VER | ${DISK_GB}GB ==="
 
-      - name: Tao va format base.img (ext4)
+      - name: Tao va format base.img
         run: |
           DISK_GB="${{ steps.cfg.outputs.DISK_GB }}"
           dd if=/dev/null of=base.img bs=1M seek=$(( DISK_GB * 1024 ))
@@ -61,143 +60,82 @@ jobs:
           ALPINE_VER="${{ steps.cfg.outputs.ALPINE_VER }}"
           MINOR=$(echo "$ALPINE_VER" | cut -d. -f1-2)
 
-          mkdir -p /tmp/alpine-root
-          sudo mount -o loop base.img /tmp/alpine-root
-          sudo tar -xzf alpine-minirootfs.tar.gz -C /tmp/alpine-root
+          mkdir -p /tmp/r
+          sudo mount -o loop base.img /tmp/r
+          sudo tar -xzf alpine-minirootfs.tar.gz -C /tmp/r
 
-          # --- DNS ---
-          sudo tee /tmp/alpine-root/etc/resolv.conf > /dev/null <<'EOF'
-nameserver 10.0.2.3
-nameserver 8.8.8.8
-EOF
+          # DNS
+          printf 'nameserver 10.0.2.3\nnameserver 8.8.8.8\n' | sudo tee /tmp/r/etc/resolv.conf > /dev/null
 
-          # --- APK repos (khong chay apk update o day, de chroot tu lam) ---
-          sudo tee /tmp/alpine-root/etc/apk/repositories > /dev/null <<EOF
-https://dl-cdn.alpinelinux.org/alpine/v${MINOR}/main
-https://dl-cdn.alpinelinux.org/alpine/v${MINOR}/community
-EOF
+          # APK repos
+          printf "https://dl-cdn.alpinelinux.org/alpine/v%s/main\nhttps://dl-cdn.alpinelinux.org/alpine/v%s/community\n" "$MINOR" "$MINOR" \
+            | sudo tee /tmp/r/etc/apk/repositories > /dev/null
 
-          # --- fstab ---
-          sudo tee /tmp/alpine-root/etc/fstab > /dev/null <<'EOF'
-          /dev/ubda  /        ext4  defaults  0 1
-          proc       /proc    proc  defaults  0 0
-          sysfs      /sys     sysfs defaults  0 0
-          tmpfs      /tmp     tmpfs defaults  0 0
-          EOF
+          # fstab
+          printf '/dev/ubda  /     ext4  defaults  0 1\nproc  /proc  proc  defaults  0 0\nsysfs /sys  sysfs defaults  0 0\ntmpfs /tmp  tmpfs defaults  0 0\n' \
+            | sudo tee /tmp/r/etc/fstab > /dev/null
 
-          # --- hostname ---
-          echo "alpine-uml" | sudo tee /tmp/alpine-root/etc/hostname > /dev/null
+          # hostname
+          printf 'alpine-uml\n' | sudo tee /tmp/r/etc/hostname > /dev/null
 
-          # --- Network: static IP cho SLIRP ---
-          sudo tee /tmp/alpine-root/etc/network/interfaces > /dev/null <<'EOF'
-          auto lo
-          iface lo inet loopback
+          # network (SLIRP static)
+          printf 'auto lo\niface lo inet loopback\n\nauto eth0\niface eth0 inet static\n  address 10.0.2.15\n  netmask 255.255.255.0\n  gateway 10.0.2.2\n' \
+            | sudo tee /tmp/r/etc/network/interfaces > /dev/null
 
-          auto eth0
-          iface eth0 inet static
-            address 10.0.2.15
-            netmask 255.255.255.0
-            gateway 10.0.2.2
-          EOF
+          # inittab (UML dung /dev/console)
+          printf '::sysinit:/sbin/openrc sysinit\n::sysinit:/sbin/openrc boot\n::wait:/sbin/openrc default\nconsole::respawn:/sbin/getty -L console 115200 vt100\ntty1::respawn:/sbin/getty -L tty1 115200 vt100\n::ctrlaltdel:/sbin/reboot\n::shutdown:/sbin/openrc shutdown\n' \
+            | sudo tee /tmp/r/etc/inittab > /dev/null
 
-          # --- inittab: UML dung /dev/console ---
-          sudo tee /tmp/alpine-root/etc/inittab > /dev/null <<'EOF'
-          ::sysinit:/sbin/openrc sysinit
-          ::sysinit:/sbin/openrc boot
-          ::wait:/sbin/openrc default
-          console::respawn:/sbin/getty -L console 115200 vt100
-          tty1::respawn:/sbin/getty -L tty1 115200 vt100
-          ::ctrlaltdel:/sbin/reboot
-          ::shutdown:/sbin/openrc shutdown
-          EOF
-
-          # --- Cai package (chay BEN TRONG Alpine image) ---
-          echo ">>> apk update + upgrade + add packages..."
-          sudo chroot /tmp/alpine-root /bin/sh -c "
+          # Cai package BEN TRONG Alpine image
+          sudo chroot /tmp/r /bin/sh -c "
+            set -e
             apk update
             apk upgrade --no-cache
-            apk add --no-cache \
-              openjdk21-jre-headless \
-              openssh openrc bash \
-              curl wget ca-certificates \
-              tzdata screen \
-              fastfetch
+            apk add --no-cache openjdk21-jre-headless openssh openrc bash curl wget ca-certificates tzdata screen fastfetch
           "
 
-          # --- SSH config ---
-          sudo chroot /tmp/alpine-root /bin/sh -c "
+          # SSH config
+          sudo chroot /tmp/r /bin/sh -c "
             sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
             sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
             ssh-keygen -A
             echo 'root:toor' | chpasswd
           "
 
-          # --- Enable services ---
-          sudo chroot /tmp/alpine-root /bin/sh -c "
+          # Enable services
+          sudo chroot /tmp/r /bin/sh -c "
             rc-update add sshd default
             rc-update add networking boot
             rc-update add hostname boot
           "
 
-          # --- Minecraft ---
-          sudo mkdir -p /tmp/alpine-root/opt/minecraft
+          # Minecraft
+          sudo mkdir -p /tmp/r/opt/minecraft
+          [ -f server.jar ] && sudo cp server.jar /tmp/r/opt/minecraft/ && echo ">>> server.jar copied" || echo "WARN: no server.jar"
 
-          [ -f server.jar ] && sudo cp server.jar /tmp/alpine-root/opt/minecraft/ \
-            && echo ">>> server.jar da copy" \
-            || echo "CANH BAO: chua co server.jar, can upload sau"
+          printf 'server-ip=0.0.0.0\nserver-port=25565\nquery.port=25565\nmax-tick-time=60000\nplayer-idle-timeout=10\nview-distance=10\nsimulation-distance=5\naccepts-transfers=true\n' \
+            | sudo tee /tmp/r/opt/minecraft/server.properties > /dev/null
 
-          sudo tee /tmp/alpine-root/opt/minecraft/server.properties > /dev/null <<'EOF'
-          server-ip=0.0.0.0
-          server-port=25565
-          query.port=25565
-          max-tick-time=60000
-          player-idle-timeout=10
-          view-distance=10
-          simulation-distance=5
-          accepts-transfers=true
-          EOF
+          printf 'eula=true\n' | sudo tee /tmp/r/opt/minecraft/eula.txt > /dev/null
 
-          echo "eula=true" | sudo tee /tmp/alpine-root/opt/minecraft/eula.txt > /dev/null
+          printf '#!/bin/bash\ncd /opt/minecraft\nexec java -Xms512M -Xmx1800M -XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200 -XX:+UnlockExperimentalVMOptions -XX:+DisableExplicitGC -jar server.jar nogui\n' \
+            | sudo tee /tmp/r/opt/minecraft/start.sh > /dev/null
+          sudo chmod +x /tmp/r/opt/minecraft/start.sh
 
-          sudo tee /tmp/alpine-root/opt/minecraft/start.sh > /dev/null <<'MCEOF'
-          #!/bin/bash
-          cd /opt/minecraft
-          exec java \
-            -Xms512M -Xmx1800M \
-            -XX:+UseG1GC \
-            -XX:+ParallelRefProcEnabled \
-            -XX:MaxGCPauseMillis=200 \
-            -XX:+UnlockExperimentalVMOptions \
-            -XX:+DisableExplicitGC \
-            -jar server.jar nogui
-          MCEOF
-          sudo chmod +x /tmp/alpine-root/opt/minecraft/start.sh
+          # OpenRC service
+          printf '#!/sbin/openrc-run\nname="minecraft"\ndescription="Minecraft Java Server"\ncommand="/opt/minecraft/start.sh"\ncommand_background=true\npidfile="/run/minecraft.pid"\noutput_log="/var/log/minecraft.log"\nerror_log="/var/log/minecraft.log"\ndepend() { after networking sshd; }\n' \
+            | sudo tee /tmp/r/etc/init.d/minecraft > /dev/null
+          sudo chmod +x /tmp/r/etc/init.d/minecraft
 
-          # --- OpenRC service cho Minecraft ---
-          sudo tee /tmp/alpine-root/etc/init.d/minecraft > /dev/null <<'EOF'
-          #!/sbin/openrc-run
-          name="minecraft"
-          description="Minecraft Java Server"
-          command="/opt/minecraft/start.sh"
-          command_background=true
-          pidfile="/run/minecraft.pid"
-          output_log="/var/log/minecraft.log"
-          error_log="/var/log/minecraft.log"
-          depend() {
-            after networking sshd
-          }
-          EOF
-          sudo chmod +x /tmp/alpine-root/etc/init.d/minecraft
-
-          sudo chroot /tmp/alpine-root /bin/sh -c "rc-update add minecraft default"
+          sudo chroot /tmp/r /bin/sh -c "rc-update add minecraft default"
 
           echo "=== Disk usage ==="
-          df -h /tmp/alpine-root
+          df -h /tmp/r
 
       - name: Unmount
-        run: sudo umount /tmp/alpine-root
+        run: sudo umount /tmp/r
 
-      - name: Nen base.img -> base.zip
+      - name: Nen base.img thanh base.zip
         run: |
           zip -9 base.zip base.img
           du -sh base.img base.zip
@@ -212,15 +150,14 @@ EOF
       - name: Huong dan
         run: |
           echo "==========================================="
-          echo "  SAU KHI DOWNLOAD artifact:"
-          echo "  1. Giai nen ra base.zip"
-          echo "  2. Upload base.zip -> /home/container/"
-          echo "  3. run.sh tu dong giai nen + boot UML"
+          echo "SAU KHI DOWNLOAD artifact:"
+          echo "1. Upload base.zip -> /home/container/"
+          echo "2. run.sh tu dong giai nen + boot UML"
           echo ""
-          echo "  slirp.yaml ports can them:"
-          echo "    - 28103:25565  # Minecraft Java"
-          echo "    - 28102:22     # SSH"
+          echo "slirp.yaml:"
+          echo "  - 28102:22     # SSH"
+          echo "  - 28103:25565  # Minecraft Java"
           echo ""
-          echo "  ssh root@<ip> -p 28102  (pass: toor)"
-          echo "  Minecraft: <ip>:28103"
+          echo "ssh root@<ip> -p 28102  (pass: toor)"
+          echo "Minecraft: <ip>:28103"
           echo "==========================================="
