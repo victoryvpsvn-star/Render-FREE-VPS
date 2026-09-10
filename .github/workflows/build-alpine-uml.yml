@@ -1,127 +1,226 @@
-name: Build Alpine Linux disk.img for UML
+name: Build Alpine Linux disk.img for UML (Minecraft)
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      disk_size_gb:
+        description: 'Kich thuoc disk (GB), mac dinh 9'
+        required: false
+        default: '9'
+      alpine_version:
+        description: 'Phien ban Alpine (mac dinh 3.19)'
+        required: false
+        default: '3.19'
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Cai cong cu build
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y \
-            wget dosfstools e2fsprogs \
-            parted util-linux qemu-utils
+          sudo apt-get install -y e2fsprogs util-linux wget curl zip
 
-      - name: Download Alpine Linux minirootfs
+      - name: Thiet lap bien
+        id: cfg
         run: |
-          # Alpine 3.19 x86_64 minirootfs (~17MB installed)
-          ALPINE_VERSION=3.19.1
-          ARCH=x86_64
-          TARBALL=alpine-minirootfs-${ALPINE_VERSION}-${ARCH}.tar.gz
-          wget -q "https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/${ARCH}/${TARBALL}" \
-            -O alpine-minirootfs.tar.gz
-          echo "Downloaded Alpine minirootfs"
+          DISK_GB="${{ github.event.inputs.disk_size_gb || '9' }}"
+          ALPINE_VER="${{ github.event.inputs.alpine_version || '3.19' }}"
+          ARCH="x86_64"
+          echo "DISK_GB=$DISK_GB"       >> "$GITHUB_OUTPUT"
+          echo "ALPINE_VER=$ALPINE_VER" >> "$GITHUB_OUTPUT"
+          echo "ARCH=$ARCH"             >> "$GITHUB_OUTPUT"
+          echo "=== Alpine $ALPINE_VER | ${DISK_GB}GB ==="
 
-      - name: Create disk.img with ext4
+      - name: Tao va format base.img (ext4)
         run: |
-          # Create a 64MB sparse image (Alpine ~17MB, plenty of room)
-          dd if=/dev/null of=disk.img bs=1M seek=64
-          
-          # Format as ext4
-          mkfs.ext4 -F -L alpine-uml disk.img
-          
-          echo "disk.img created and formatted"
+          DISK_GB="${{ steps.cfg.outputs.DISK_GB }}"
+          dd if=/dev/null of=base.img bs=1M seek=$(( DISK_GB * 1024 ))
+          mkfs.ext4 -F -L alpine-uml base.img
+          echo ">>> ext4 ${DISK_GB}GB OK"
 
-      - name: Populate disk.img with Alpine rootfs
+      - name: Download Alpine minirootfs
         run: |
-          # Mount the image
-          mkdir -p /tmp/mnt
-          sudo mount -o loop disk.img /tmp/mnt
-          
-          # Extract Alpine minirootfs into the image
-          sudo tar -xzf alpine-minirootfs.tar.gz -C /tmp/mnt
-          
-          echo "=== Rootfs contents ==="
-          ls /tmp/mnt
-          
-          # Basic /etc/fstab for UML
-          sudo tee /tmp/mnt/etc/fstab > /dev/null <<'EOF'
-          /dev/root  /        ext4  defaults  0 1
+          ALPINE_VER="${{ steps.cfg.outputs.ALPINE_VER }}"
+          ARCH="${{ steps.cfg.outputs.ARCH }}"
+          MINOR=$(echo "$ALPINE_VER" | cut -d. -f1-2)
+          TARBALL="alpine-minirootfs-${ALPINE_VER}.0-${ARCH}.tar.gz"
+          URL="https://dl-cdn.alpinelinux.org/alpine/v${MINOR}/releases/${ARCH}/${TARBALL}"
+          echo ">>> Download: $URL"
+          wget -q --show-progress -O alpine-minirootfs.tar.gz "$URL"
+
+      - name: Populate rootfs vao base.img
+        run: |
+          ALPINE_VER="${{ steps.cfg.outputs.ALPINE_VER }}"
+          MINOR=$(echo "$ALPINE_VER" | cut -d. -f1-2)
+
+          mkdir -p /tmp/alpine-root
+          sudo mount -o loop base.img /tmp/alpine-root
+          sudo tar -xzf alpine-minirootfs.tar.gz -C /tmp/alpine-root
+
+          # --- DNS ---
+          sudo tee /tmp/alpine-root/etc/resolv.conf > /dev/null <<'EOF'
+          nameserver 10.0.2.3
+          nameserver 8.8.8.8
+          EOF
+
+          # --- APK repos ---
+          sudo tee /tmp/alpine-root/etc/apk/repositories > /dev/null <<EOF
+          https://dl-cdn.alpinelinux.org/alpine/v${MINOR}/main
+          https://dl-cdn.alpinelinux.org/alpine/v${MINOR}/community
+          EOF
+
+          # --- fstab ---
+          sudo tee /tmp/alpine-root/etc/fstab > /dev/null <<'EOF'
+          /dev/ubda  /        ext4  defaults  0 1
           proc       /proc    proc  defaults  0 0
           sysfs      /sys     sysfs defaults  0 0
           tmpfs      /tmp     tmpfs defaults  0 0
           EOF
-          
-          # inittab for UML (uses /dev/console, not tty1)
-          sudo tee /tmp/mnt/etc/inittab > /dev/null <<'EOF'
+
+          # --- hostname ---
+          echo "alpine-uml" | sudo tee /tmp/alpine-root/etc/hostname > /dev/null
+
+          # --- Network: static IP cho SLIRP ---
+          sudo tee /tmp/alpine-root/etc/network/interfaces > /dev/null <<'EOF'
+          auto lo
+          iface lo inet loopback
+
+          auto eth0
+          iface eth0 inet static
+            address 10.0.2.15
+            netmask 255.255.255.0
+            gateway 10.0.2.2
+          EOF
+
+          # --- inittab: UML dung /dev/console ---
+          sudo tee /tmp/alpine-root/etc/inittab > /dev/null <<'EOF'
           ::sysinit:/sbin/openrc sysinit
           ::sysinit:/sbin/openrc boot
           ::wait:/sbin/openrc default
           console::respawn:/sbin/getty -L console 115200 vt100
+          tty1::respawn:/sbin/getty -L tty1 115200 vt100
+          ::ctrlaltdel:/sbin/reboot
           ::shutdown:/sbin/openrc shutdown
           EOF
-          
-          # Set root password to empty (for easy UML login)
-          sudo chroot /tmp/mnt /bin/sh -c "passwd -d root"
-          
-          # Minimal hostname
-          echo "alpine-uml" | sudo tee /tmp/mnt/etc/hostname > /dev/null
-          
-          # loopback interface
-          sudo tee /tmp/mnt/etc/network/interfaces > /dev/null <<'EOF'
-          auto lo
-          iface lo inet loopback
+
+          # --- Cai package (chay BEN TRONG Alpine image) ---
+          echo ">>> apk update + upgrade + add packages..."
+          sudo chroot /tmp/alpine-root /bin/sh -c "
+            apk update
+            apk upgrade --no-cache
+            apk add --no-cache \
+              openjdk21-jre-headless \
+              openssh openrc bash \
+              curl wget ca-certificates \
+              tzdata screen \
+              fastfetch
+          "
+
+          # --- SSH config ---
+          sudo chroot /tmp/alpine-root /bin/sh -c "
+            sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+            sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+            ssh-keygen -A
+            echo 'root:toor' | chpasswd
+          "
+
+          # --- Enable services ---
+          sudo chroot /tmp/alpine-root /bin/sh -c "
+            rc-update add sshd default
+            rc-update add networking boot
+            rc-update add hostname boot
+          "
+
+          # --- Minecraft ---
+          sudo mkdir -p /tmp/alpine-root/opt/minecraft
+
+          [ -f server.jar ] && sudo cp server.jar /tmp/alpine-root/opt/minecraft/ \
+            && echo ">>> server.jar da copy" \
+            || echo "CANH BAO: chua co server.jar, can upload sau"
+
+          sudo tee /tmp/alpine-root/opt/minecraft/server.properties > /dev/null <<'EOF'
+          server-ip=0.0.0.0
+          server-port=25565
+          query.port=25565
+          max-tick-time=60000
+          player-idle-timeout=10
+          view-distance=10
+          simulation-distance=5
+          accepts-transfers=true
           EOF
 
-      - name: Show disk usage
-        run: |
-          df -h /tmp/mnt
-          echo "=== Alpine version ==="
-          cat /tmp/mnt/etc/alpine-release 2>/dev/null || true
+          echo "eula=true" | sudo tee /tmp/alpine-root/opt/minecraft/eula.txt > /dev/null
 
-      - name: Unmount image
-        run: |
-          sudo umount /tmp/mnt
+          sudo tee /tmp/alpine-root/opt/minecraft/start.sh > /dev/null <<'MCEOF'
+          #!/bin/bash
+          cd /opt/minecraft
+          exec java \
+            -Xms512M -Xmx1800M \
+            -XX:+UseG1GC \
+            -XX:+ParallelRefProcEnabled \
+            -XX:MaxGCPauseMillis=200 \
+            -XX:+UnlockExperimentalVMOptions \
+            -XX:+DisableExplicitGC \
+            -jar server.jar nogui
+          MCEOF
+          sudo chmod +x /tmp/alpine-root/opt/minecraft/start.sh
 
-      - name: Compress disk.img
-        run: |
-          # Show raw size
-          du -sh disk.img
-          
-          # Compress for artifact upload
-          gzip -9 -k disk.img
-          du -sh disk.img.gz
+          # --- OpenRC service cho Minecraft ---
+          sudo tee /tmp/alpine-root/etc/init.d/minecraft > /dev/null <<'EOF'
+          #!/sbin/openrc-run
+          name="minecraft"
+          description="Minecraft Java Server"
+          command="/opt/minecraft/start.sh"
+          command_background=true
+          pidfile="/run/minecraft.pid"
+          output_log="/var/log/minecraft.log"
+          error_log="/var/log/minecraft.log"
+          depend() {
+            after networking sshd
+          }
+          EOF
+          sudo chmod +x /tmp/alpine-root/etc/init.d/minecraft
 
-      - name: Upload disk.img as artifact
+          sudo chroot /tmp/alpine-root /bin/sh -c "rc-update add minecraft default"
+
+          echo "=== Disk usage ==="
+          df -h /tmp/alpine-root
+
+      - name: Unmount
+        run: sudo umount /tmp/alpine-root
+
+      - name: Nen base.img -> base.zip
+        run: |
+          zip -9 base.zip base.img
+          du -sh base.img base.zip
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: alpine-uml-disk
-          path: |
-            disk.img
-            disk.img.gz
+          name: alpine-uml-disk-${{ steps.cfg.outputs.DISK_GB }}gb
+          path: base.zip
           retention-days: 30
 
-      - name: Show usage instructions
+      - name: Huong dan
         run: |
-          echo "=========================================="
-          echo "  HOW TO USE disk.img WITH LINUX UML"
-          echo "=========================================="
+          echo "==========================================="
+          echo "  SAU KHI DOWNLOAD artifact:"
+          echo "  1. Giai nen ra base.zip"
+          echo "  2. Upload base.zip -> /home/container/"
+          echo "  3. run.sh tu dong giai nen + boot UML"
           echo ""
-          echo "Download the artifact, then run:"
+          echo "  slirp.yaml ports can them:"
+          echo "    - 28103:25565  # Minecraft Java"
+          echo "    - 28102:22     # SSH"
           echo ""
-          echo "  linux ubd0=disk.img mem=256M"
-          echo ""
-          echo "Or with network (tap):"
-          echo ""
-          echo "  linux ubd0=disk.img mem=256M eth0=tuntap,tap0"
-          echo ""
-          echo "Login: root (no password)"
-          echo "=========================================="
+          echo "  ssh root@<ip> -p 28102  (pass: toor)"
+          echo "  Minecraft: <ip>:28103"
+          echo "==========================================="
